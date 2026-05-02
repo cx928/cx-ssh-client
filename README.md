@@ -1,7 +1,7 @@
 cx-ssh-client 是由 程星工作室 開發的 SSH 客戶端工具，支援 SSH 遠端連線與 SFTP 檔案管理。
-简体中文<https://github.com/cx928/cx-ssh-client/blob/main/README_cns.md>
-繁體中文<https://github.com/cx928/cx-ssh-client/blob/main/README.md>
-English<https://github.com/cx928/cx-ssh-client/blob/main/README_en.md>
+[简体中文](https://github.com/cx928/cx-ssh-client/blob/main/README_cns.md)  
+[繁體中文](https://github.com/cx928/cx-ssh-client/blob/main/README.md)  
+[English](https://github.com/cx928/cx-ssh-client/blob/main/README_en.md)
 ⚠️ 當前版本為 預覽版本（Preview），主要用於功能驗證與測試。
 
 📦 版本資訊
