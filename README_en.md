@@ -1,4 +1,6 @@
-cx-ssh-client is an SSH client tool developed by Chengxing Studio, supporting SSH remote connection and SFTP file management.
+# cx-ssh-client 
+
+an SSH client tool developed by Chengxing Studio, supporting SSH remote connection and SFTP file management.
 
 [简体中文](https://github.com/cx928/cx-ssh-client/blob/main/README_cns.md)  
 
