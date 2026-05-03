@@ -1,4 +1,4 @@
-# cx-ssh-client 程星SSH客户端
+# 程星SSH客户端
 
 程星工作室 開發的 SSH 客戶端工具，支援 SSH 遠端連線與 SFTP 檔案管理。
 
