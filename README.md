@@ -60,5 +60,7 @@ python main.py
 ssh-client.v0.0.3.7z 預編譯套件 e7fd1aa07dcce8d354a2efb2cab617b393b1e9da9a3f1501162b1dff3fee0fff
 
 Source code (zip) 源碼 —
+## Stargazers over time
+[![Stargazers over time](https://starchart.cc/cx928/cx-ssh-client.svg?variant=dark)](https://starchart.cc/cx928/cx-ssh-client)
 
 Source code (tar.gz) 源碼 —
