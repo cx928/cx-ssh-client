@@ -108,17 +108,38 @@ name	protocol	host	port	username	password	note
 cpp/
 ├─ cx-ssh-client.cpp      入口：wWinMain、标准输出接管、命令行参数分发
 ├─ src/
-│  ├─ common.h            公共头（Windows 版本宏、通用工具声明）
+│  ├─ common.h/.cpp       公共头 + 通用工具（UTF-8 转换、Win32 错误文本、格式化）
 │  ├─ session.h/.cpp      会话模型、DPAPI 加密存储、文本序列化、CSV 导入导出
 │  ├─ probe.h/.cpp        WinSock2 TCP 连接 + 各协议 banner 探测
 │  └─ ui.h/.cpp           主窗口、工具栏、ListView、状态栏、编辑对话框、连接分发
+├─ tools/
+│  └─ gen.cpp             验证辅助工具（造 N 条会话 / dump 存储文件），不是程序本体
 ├─ app.rc                 资源脚本（嵌入清单）
 ├─ app.manifest           comctl32 v6 + 高 DPI + UTF-8 代码页清单
 ├─ build.ps1              一键编译脚本
+├─ uitest.ps1             跨进程 UI 自动化测试（25 项断言）
+├─ measure-mem.ps1        内存占用测量脚本
 └─ README.md              本文件
 ```
 
 编译产物位于 `build\cx-ssh-client.exe`。
+
+### 自测脚本怎么用
+
+```powershell
+# 1) 编译程序 + 验证工具
+.\build.ps1 -Clean -WithTools
+
+# 2) 跨进程 UI 自动化：真的去点对话框、填字段、点确定，再解密存储文件核对结果
+powershell -ExecutionPolicy Bypass -File .\uitest.ps1
+
+# 3) 内存测量：分别加载 0 / 1 / 2000 / 10000 条会话，报告工作集与私有字节
+powershell -ExecutionPolicy Bypass -File .\measure-mem.ps1 -Counts 0,1,2000,10000
+```
+
+`uitest.ps1` 用的都是标准 Win32 手法，顺便记录了两个容易踩的坑（脚本里有注释）：
+`GetWindowTextW` 对**其它进程里的控件**取不到文本（必须改用 `WM_GETTEXT`）；
+会进入模态循环的消息（如点击「新建」）必须用 `PostMessage`，否则自己的 `SendMessage` 会被卡住。
 
 ---
 
@@ -159,7 +180,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
 脚本会：找到 g++ → 用 `windres` 编译 `app.rc`（嵌入清单，启用现代控件外观与高 DPI）→
-编译 4 个 .cpp → 统计 error/warning 数量 → 输出 `build\cx-ssh-client.exe`。
+编译 5 个 .cpp → 统计 error/warning 数量 → 输出 `build\cx-ssh-client.exe`。
 
 常用参数：
 
@@ -167,21 +188,37 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 .\build.ps1 -Clean                              # 先清空 build 目录
 .\build.ps1 -GxxPath "C:\msys64\ucrt64\bin\g++.exe"
 .\build.ps1 -NoManifest                         # 不嵌入清单（没有 windres 时）
+.\build.ps1 -WithTools                          # 顺便编译验证工具 build\gen.exe
 ```
 
-### 3. 等价的裸编译命令
+### 3. 体积与内存相关的编译选项
+
+默认就带上，不需要手工加：
+
+| 选项 | 作用 |
+| --- | --- |
+| `-ffunction-sections -fdata-sections -Wl,--gc-sections` | 每个函数/数据独立成节，链接时丢弃没被引用的部分 |
+| `-fno-rtti` | 本程序不用 RTTI，关掉可省一批类型信息 |
+| `-s` | 剥掉符号表 |
+| `-static` | 静态链接 libstdc++/libgcc/libwinpthread，产物不依赖任何第三方 DLL |
+
+这几项把 exe 从 921.8 KB 压到 **482.5 KB（−47.7%）**，进程启动时要映射和触碰的页也随之减少。
+
+### 4. 等价的裸编译命令
 
 不想用脚本时，手工执行下面这一行即可（在 `cpp\` 目录下）：
 
 ```powershell
 g++ -std=c++17 -municode -O2 -static -mwindows `
+    -ffunction-sections -fdata-sections -fno-rtti -Wl,--gc-sections -s `
     -finput-charset=UTF-8 -fexec-charset=UTF-8 `
-    cx-ssh-client.cpp src\session.cpp src\probe.cpp src\ui.cpp build\app.res `
+    cx-ssh-client.cpp src\common.cpp src\session.cpp src\probe.cpp src\ui.cpp build\app.res `
     -o build\cx-ssh-client.exe `
     -lws2_32 -lcomctl32 -lcrypt32 -lshlwapi -lole32 -lshell32 -lcomdlg32 -lgdi32 -ladvapi32
 ```
 
-（`build\app.res` 可选，用 `windres --input=app.rc --output=build\app.res --include-dir=.` 生成。）
+（`build\app.res` 可选，用 `windres --input=app.rc --output=build\app.res --include-dir=. -O coff` 生成。
+注意 **`-O coff` 不能省**：windres 默认输出裸 `.res`，新版 binutils 的 ld 不认。）
 
 > 源码统一保存为 **UTF-8 带 BOM**，同时编译时显式指定
 > `-finput-charset=UTF-8 -fexec-charset=UTF-8`，字符串全部使用 `L"…"` 宽字面量并调用宽字符
@@ -303,3 +340,57 @@ BANNER: SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10
 11. **工具栏、状态栏不支持用户自定义**（不能拖动、隐藏或改顺序），
     按钮布局写死在 `BuildToolbar()` 里。这块用的是最朴素的 comctl32 工具栏，
     好处是不用维护任何配置，也就能保持零依赖。
+12. **协议下拉列表一屏只显示约 3 行**（共 5 项，其余靠滚动条）。
+    这是本机 comctl32 给下拉列表的高度上限。已经用四种办法验证过都突破不了：
+    加大建框高度、`CB_SETMINVISIBLE(5/6/8/10)`、把父窗口撑到 1000px 高、换成系统默认字体
+    （行高从 24px 降到 20px，可见行数始终是 3.4 行）。
+    **注意这是外观问题，不影响功能**：5 个协议都在列表里，滚动即可选中。
+    （顺带说明：这个下拉框原来根本打不开——见下面「已修复的问题」。）
+
+---
+
+## 六、内存占用
+
+在同一台机器上实测（MSYS2 UCRT GCC 16.2.0，Windows GUI 子系统）：
+
+| 会话数 | 数据文件 | 工作集 | 私有字节 | 句柄 | GDI | USER |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | 0 KB | 0.79 MB | 2.17 MB | 165 | 24 | 20 |
+| 1 | 0.4 KB | 0.43 MB | 2.12 MB | 167 | 24 | 20 |
+| 2000 | 304 KB | 3.01 MB | 3.26 MB | 167 | 30 | 22 |
+| 10000 | 1.5 MB | 0.51 MB | 8.25 MB | 167 | 24 | 20 |
+
+* **私有字节**才是程序真正占住的内存；工作集里大部分是 libstdc++ / comctl32 / 字体等**共享只读页**。
+* 每多一条会话约 **0.55–0.6 KB**（优化前是 1.29 KB）。
+* 界面稳定后程序会主动调用一次 `SetProcessWorkingSetSize(-1,-1)`，
+  把已经用不到的页还给系统。实测（2000 条会话）：启动第 1 秒工作集约 16 MB，
+  第 2 秒降到 0.17 MB，之后稳定在 **0.5 MB 左右**；私有字节始终稳定在 3.2 MB，没有反弹。
+  需要时这些页会自动缺页调回，代价很小。
+
+做了这些优化：
+
+| 优化 | 效果 |
+| --- | --- |
+| ListView 改用**虚拟列表**（`LVS_OWNERDATA` + `LVN_GETDISPINFO`） | 控件不再复制一份全部单元格文本，每条会话只存一份；1500 行的列表内存降约一半 |
+| 存储读写去掉整块拷贝 | 保存时文件头与密文分两次写，不再复制一份完整密文；明文加密后立刻释放 |
+| 按文件大小 `reserve`、按会话数 `reserve` | 读大文件/拼长文本时不再反复扩容复制 |
+| 导入 CSV 不再整份拷贝会话列表 | 「追加失败截断、替换失败换回」，全程 O(1) 换出 |
+| `-ffunction-sections -fdata-sections -fno-rtti -Wl,--gc-sections -s` | exe 921.8 KB → **482.5 KB（−47.7%）** |
+| 空闲时回收工作集 | 工作集 16 MB → **0.5 MB** |
+
+---
+
+## 七、已修复的问题（相对初版）
+
+| # | 问题 | 现象 | 修法 |
+| --- | --- | --- | --- |
+| 1 | **协议下拉框完全打不开** | 建框时高度给 0，comctl32 算出的下拉列表高度就是 0；`CB_GETDROPPEDCONTROLRECT` 返回 (0,0)-(0,0)，用户根本没法选协议 | 建框时就把展开区算进高度，`EditLayout` 再按实际行高精确定位；补 `CB_SETMINVISIBLE` |
+| 2 | 探测的 TCP 连接与协议握手共用一份超时预算 | 慢链路下 connect 花掉 4 s，握手只剩 1 s，会误报「端口已连接但未收到 SSH 标识」 | 两个阶段各拿完整的 5 s 预算 |
+| 3 | Winsock 非阻塞 connect 失败时误报超时 | 端口关闭时应立刻报「拒绝」，却等了 5 s 才报超时 | `select` 同时等 writefds 和 **exceptfds**（Winsock 特有语义） |
+| 4 | 探测结果把 TCP 阶段说明覆盖掉 | 结果里看不到「TCP 已连接」这一步 | 拆出 `pr` 再合并 detail |
+| 5 | 后台探测线程可能泄漏内存 | 主窗口已销毁时 `PostMessage(NULL,…)` 会成功投递到线程队列而无人处理，`ProbeResult`/`ProbeTask` 两块内存泄漏 | 任务里记下创建时的 HWND，投递前 `IsWindow` 校验，失败就地释放 |
+| 6 | 保存失败时界面与磁盘不一致 | 「编辑」保存失败后，列表显示新值但磁盘还是旧值 | 保存失败回滚内存中的会话 |
+| 7 | 探测用全局套接字 | 后台线程共用 `g_sock`，存在竞态 | 改成局部变量并在所有路径关闭 |
+| 8 | 启动时会多弹一个黑色控制台窗口 | GUI 模式下 `OutInit()` 仍会 AttachConsole/AllocConsole | 只有确定是命令行模式才接管控制台 |
+| 9 | 菜单句柄退出时未释放 | — | `WM_DESTROY` 里显式 `DestroyMenu` |
+| 10 | 工具栏高度 0×0 完全不显示 | `CCS_NORESIZE` 让 `TB_AUTOSIZE` 只算不改窗口 | 改用 `CCS_NOPARENTALIGN` 并显式 `MoveWindow`，用 `TB_GETBUTTONSIZE` 兜底 |

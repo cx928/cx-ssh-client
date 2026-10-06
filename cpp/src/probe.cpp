@@ -22,14 +22,6 @@ private:
     bool ok_ = false;
 };
 
-SOCKET g_sock = INVALID_SOCKET;
-
-void CloseSock() {
-    if (g_sock != INVALID_SOCKET) {
-        closesocket(g_sock);
-        g_sock = INVALID_SOCKET;
-    }
-}
 
 // 解析端口文本
 std::string PortText(int port) {
@@ -145,13 +137,8 @@ bool SendAll(SOCKET s, const char* data, int len) {
     return true;
 }
 
-// 剩余超时预算，避免各阶段各等一个完整超时
-int Remain(int totalMs, ULONGLONG startTick) {
-    const ULONGLONG used = GetTickCount64() - startTick;
-    if (used >= (ULONGLONG)totalMs) return 0;
-    return (int)((ULONGLONG)totalMs - used);
-}
-
+// 说明：TCP 连接和协议握手各自使用完整的 timeoutMs 预算，不互相挤占。
+// 之前是共用一个总预算，慢链路下 connect 花掉大半时间，握手只剩几百毫秒就会误判失败。
 std::wstring Sanitize(const std::string& raw) {
     std::string out;
     out.reserve(raw.size());
@@ -172,18 +159,18 @@ std::string FirstLine(const std::string& buf) {
 
 // --------------------------- 各协议探测 ------------------------------------
 
-ProbeResult DoSsh(int timeoutMs, ULONGLONG start) {
+ProbeResult DoSsh(SOCKET sk, int timeoutMs) {
     ProbeResult r;
     // 主动发送客户端标识，保证服务端一定会回应（RFC 4253 允许双向先发）
     const char* clientBanner = "SSH-2.0-CXSSHClient_1.0\r\n";
-    SendAll(g_sock, clientBanner, (int)strlen(clientBanner));
+    SendAll(sk, clientBanner, (int)strlen(clientBanner));
 
     std::string buf;
     while ((int)buf.size() < 1024) {
-        const int left = Remain(timeoutMs, start);
+        const int left = timeoutMs;
         if (left <= 0) break;
         char tmp[512];
-        const int n = RecvTimeout(g_sock, tmp, (int)sizeof(tmp), left);
+        const int n = RecvTimeout(sk, tmp, (int)sizeof(tmp), left);
         if (n > 0) {
             buf.append(tmp, n);
             if (buf.find('\n') != std::string::npos) break;   // 拿到一整行
@@ -215,14 +202,14 @@ ProbeResult DoSsh(int timeoutMs, ULONGLONG start) {
     return r;
 }
 
-ProbeResult DoFtp(int timeoutMs, ULONGLONG start) {
+ProbeResult DoFtp(SOCKET sk, int timeoutMs) {
     ProbeResult r;
     std::string buf;
     while ((int)buf.size() < 1024) {
-        const int left = Remain(timeoutMs, start);
+        const int left = timeoutMs;
         if (left <= 0) break;
         char tmp[512];
-        const int n = RecvTimeout(g_sock, tmp, (int)sizeof(tmp), left);
+        const int n = RecvTimeout(sk, tmp, (int)sizeof(tmp), left);
         if (n > 0) {
             buf.append(tmp, n);
             if (buf.find('\n') != std::string::npos) break;
@@ -249,14 +236,14 @@ ProbeResult DoFtp(int timeoutMs, ULONGLONG start) {
     return r;
 }
 
-ProbeResult DoVnc(int timeoutMs, ULONGLONG start) {
+ProbeResult DoVnc(SOCKET sk, int timeoutMs) {
     ProbeResult r;
     char buf[64] = { 0 };
     int  got = 0;
     while (got < 12) {
-        const int left = Remain(timeoutMs, start);
+        const int left = timeoutMs;
         if (left <= 0) break;
-        const int n = RecvTimeout(g_sock, buf + got, 12 - got, left);
+        const int n = RecvTimeout(sk, buf + got, 12 - got, left);
         if (n > 0) { got += n; continue; }
         if (n == 0)  { r.detail += L"服务端提前关闭连接。"; break; }
         if (n == -2) { r.detail += L"等待 RFB 版本号超时。"; break; }
@@ -284,7 +271,7 @@ ProbeResult DoVnc(int timeoutMs, ULONGLONG start) {
     if (major != 3 || useMinor < 3) useMinor = 3;  // 至少 3.3
     char reply[16] = { 0 };
     sprintf_s(reply, 16, "RFB %03d.%03d\n", 3, useMinor);
-    const bool replied = SendAll(g_sock, reply, 12);
+    const bool replied = SendAll(sk, reply, 12);
 
     r.ok     = true;
     r.summary = L"VNC 服务可用";
@@ -296,8 +283,7 @@ ProbeResult DoVnc(int timeoutMs, ULONGLONG start) {
     // 顺手读取安全类型数量（1 字节），验证握手确实在推进
     if (useMinor >= 7) {
         char c = 0;
-        const int left = Remain(timeoutMs, start);
-        const int n = (left > 0) ? RecvTimeout(g_sock, &c, 1, left) : -2;
+        const int n = RecvTimeout(sk, &c, 1, timeoutMs);
         if (n == 1) {
             const int cnt = (unsigned char)c;
             if (cnt == 0) {
@@ -336,8 +322,10 @@ ProbeResult ProbeSession(const std::wstring& proto, const std::wstring& host, in
     }
 
     const ULONGLONG start = GetTickCount64();
+    // 套接字用局部变量，不用全局：探测在后台线程跑，全局套接字容易出竞态
+    SOCKET sk = INVALID_SOCKET;
     std::wstring cerr;
-    if (!ConnectTimeout(host, port, timeoutMs, g_sock, cerr)) {
+    if (!ConnectTimeout(host, port, timeoutMs, sk, cerr)) {
         r.elapsedMs = (long long)(GetTickCount64() - start);
         r.summary   = L"连接失败";
         r.detail    = cerr;
@@ -347,9 +335,9 @@ ProbeResult ProbeSession(const std::wstring& proto, const std::wstring& host, in
     const std::wstring tcpNote = L"TCP " + host + L":" + FormatI64(port) + L" 已连接。\r\n";
 
     ProbeResult pr;
-    if (p == L"SSH" || p == L"SFTP")      pr = DoSsh(timeoutMs, start);
-    else if (p == L"FTP")                 pr = DoFtp(timeoutMs, start);
-    else if (p == L"VNC")                 pr = DoVnc(timeoutMs, start);
+    if (p == L"SSH" || p == L"SFTP")      pr = DoSsh(sk, timeoutMs);
+    else if (p == L"FTP")                 pr = DoFtp(sk, timeoutMs);
+    else if (p == L"VNC")                 pr = DoVnc(sk, timeoutMs);
     else if (p == L"RDP") {
         // RDP 需要 TLS + CredSSP 协商，这里只做 TCP 连通性测试
         pr.ok      = true;
@@ -361,9 +349,9 @@ ProbeResult ProbeSession(const std::wstring& proto, const std::wstring& host, in
         pr.detail  = L"未指定具体协议，仅完成 TCP 连通性测试。";
     }
 
+    closesocket(sk);          // 任何路径都不会漏关
     // 把 TCP 阶段的进展拼回协议阶段的结果（pr 是整体赋值出来的，别把这段说明丢掉）
     pr.detail   = tcpNote + pr.detail;
     pr.elapsedMs = (long long)(GetTickCount64() - start);
-    CloseSock();
     return pr;
 }

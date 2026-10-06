@@ -7,14 +7,16 @@
         powershell -ExecutionPolicy Bypass -File build.ps1 -Clean
         powershell -ExecutionPolicy Bypass -File build.ps1 -GxxPath "C:\msys64\mingw64\bin\g++.exe"
         powershell -ExecutionPolicy Bypass -File build.ps1 -NoManifest      # 不嵌入清单（无 windres 时）
+        powershell -ExecutionPolicy Bypass -File build.ps1 -WithTools       # 顺便编译验证工具 gen.exe
 
-    产物：build\cx-ssh-client.exe
+    产物：build\cx-ssh-client.exe（-WithTools 时另有 build\gen.exe）
 #>
 [CmdletBinding()]
 param(
     [string] $GxxPath    = '',
     [switch] $Clean,
-    [switch] $NoManifest
+    [switch] $NoManifest,
+    [switch] $WithTools
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,6 +29,7 @@ $resOut = Join-Path $outDir 'app.res'
 
 $sources = @(
     'cx-ssh-client.cpp',
+    'src\common.cpp',
     'src\session.cpp',
     'src\probe.cpp',
     'src\ui.cpp'
@@ -164,6 +167,13 @@ $gxxArgs = @(
     '-Wall'
     '-Wextra'
     '-Wno-unused-parameter'
+    # 体积/内存优化：每个函数、每个数据各自一个节，链接时把没用到的整段丢掉，
+    # 再剥掉符号表。镜像越小，进程启动时要映射和触碰的页就越少。
+    '-ffunction-sections'
+    '-fdata-sections'
+    '-fno-rtti'
+    '-Wl,--gc-sections'
+    '-s'
     '-Wl,--nxcompat'
     '-Wl,--dynamicbase'
     '-o', $exeOut
@@ -206,5 +216,35 @@ if ($exitCode -ne 0 -or -not (Test-Path -LiteralPath $exeOut)) {
 
 $fi = Get-Item -LiteralPath $exeOut
 Write-Host ("  产物: {0}  ({1:N0} 字节)" -f $fi.FullName, $fi.Length) -ForegroundColor Green
+
+# ---------------------------------------------------------------------------
+# 5. 可选的验证工具（内存测量 / 存储 dump 用，不属于程序本体）
+# ---------------------------------------------------------------------------
+if ($WithTools) {
+    $genOut = Join-Path $outDir 'gen.exe'
+    $genArgs = @(
+        '-std=c++17', '-O2', '-municode', '-static', '-mconsole',
+        '-I.', '-Isrc', '-finput-charset=UTF-8', '-fexec-charset=UTF-8',
+        '-o', $genOut, 'tools\gen.cpp', 'src\common.cpp', 'src\session.cpp',
+        '-lcrypt32', '-lshlwapi', '-lole32', '-lshell32', '-ladvapi32', '-luser32'
+    )
+    Write-Host "== 编译验证工具 gen.exe ==" -ForegroundColor Cyan
+    $prevEap2 = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    Push-Location $root
+    try {
+        & $gxx @genArgs 2>&1 | ForEach-Object { Write-Host "  $_" }
+        $genRc = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap2
+        Pop-Location
+    }
+    if ($genRc -eq 0 -and (Test-Path -LiteralPath $genOut)) {
+        Write-Host ("  gen.exe -> {0}" -f $genOut) -ForegroundColor Green
+    } else {
+        Write-Warning "gen.exe 编译失败（不影响程序本体）"
+    }
+}
+
 Write-Host "编译成功。" -ForegroundColor Green
 exit 0

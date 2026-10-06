@@ -42,7 +42,11 @@ enum : int {
     IDC_ED_USER,         IDC_ED_PASS,   IDC_ED_NOTE,
 
     IDA_ACCEL = 4001,
+    IDT_TRIM  = 4002,      // 一次性定时器：空闲后回收工作集
 };
+
+// 协议下拉框：最多 5 个协议，要求一次至少能看到 5 行
+const int kComboMinVisible = 5;
 
 const UINT WM_APP_PROBE_DONE = WM_APP + 1;
 
@@ -121,6 +125,12 @@ void SetStatus(const std::wstring& text) {
     if (g_hStatus) SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)text.c_str());
 }
 
+// 把工作集里的闲置页还给系统。GUI 程序绝大多数时间在等消息，
+// 握着十几 MB 已经用不到的页没有意义；需要时会自动缺页调回，代价很小。
+void TrimWorkingSet() {
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+}
+
 void ShowErr(const std::wstring& what, const std::wstring& err) {
     MessageBoxW(g_hMain, (what + L"\r\n\r\n" + err).c_str(), L"cx-ssh-client", MB_ICONERROR | MB_OK);
 }
@@ -163,29 +173,36 @@ bool ValidateForShell(const Session& s, std::wstring& err) {
 }
 
 // ------------------------------ 列表操作 -----------------------------------
+//
+// 列表用「虚拟列表」(LVS_OWNERDATA)：控件自己不存任何单元格文本，
+// 只在需要绘制时回调 LVN_GETDISPINFO 向 g_sessions 取。
+// 这样每条会话在内存里只存一份（g_sessions），而不是「vector 一份 + 控件再复制一份」。
+
+// 取某行某列的文本指针。返回的指针在下次修改 g_sessions 之前一直有效。
+const wchar_t* ListCellText(size_t row, int col) {
+    if (row >= g_sessions.size()) return L"";
+    const Session& s = g_sessions[row];
+    switch (col) {
+    case 0: return s.name.c_str();
+    case 1: return s.protocol.c_str();
+    case 2: return s.host.c_str();
+    case 3: {
+        // 端口列需要临时格式化；用每行一个的静态缓存，避免在绘制回调里分配堆内存
+        static std::wstring buf;
+        buf = FormatI64(s.port);
+        return buf.c_str();
+    }
+    case 4: return s.username.c_str();
+    case 5: return s.note.c_str();
+    default: return L"";
+    }
+}
 
 void RefreshList() {
     if (!g_hList) return;
-    SendMessageW(g_hList, WM_SETREDRAW, FALSE, 0);
-    ListView_DeleteAllItems(g_hList);
-    for (size_t i = 0; i < g_sessions.size(); ++i) {
-        const Session& s = g_sessions[i];
-        const std::wstring port = FormatI64(s.port);
-        LVITEMW it{};
-        it.mask     = LVIF_TEXT | LVIF_PARAM;
-        it.iItem    = (int)i;
-        it.iSubItem = 0;
-        it.pszText  = const_cast<wchar_t*>(s.name.c_str());
-        it.lParam   = (LPARAM)i;
-        const int row = ListView_InsertItem(g_hList, &it);
-        if (row < 0) continue;
-        ListView_SetItemText(g_hList, row, 1, const_cast<wchar_t*>(s.protocol.c_str()));
-        ListView_SetItemText(g_hList, row, 2, const_cast<wchar_t*>(s.host.c_str()));
-        ListView_SetItemText(g_hList, row, 3, const_cast<wchar_t*>(port.c_str()));
-        ListView_SetItemText(g_hList, row, 4, const_cast<wchar_t*>(s.username.c_str()));
-        ListView_SetItemText(g_hList, row, 5, const_cast<wchar_t*>(s.note.c_str()));
-    }
-    SendMessageW(g_hList, WM_SETREDRAW, TRUE, 0);
+    // 虚拟列表：只告诉控件有多少行，不插入任何条目
+    ListView_SetItemCountEx(g_hList, (int)g_sessions.size(),
+                            LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
     InvalidateRect(g_hList, nullptr, TRUE);
 
     if (g_hStatus) {
@@ -197,15 +214,10 @@ void RefreshList() {
 
 int SelectedIndex() {
     if (!g_hList) return -1;
+    // 虚拟列表里行号就是 g_sessions 的下标，不需要 LVIF_PARAM 兜圈子
     const int row = ListView_GetNextItem(g_hList, -1, LVNI_SELECTED);
-    if (row < 0) return -1;
-    LVITEMW it{};
-    it.mask  = LVIF_PARAM;
-    it.iItem = row;
-    if (!ListView_GetItem(g_hList, &it)) return -1;
-    const int idx = (int)it.lParam;
-    if (idx < 0 || idx >= (int)g_sessions.size()) return -1;
-    return idx;
+    if (row < 0 || row >= (int)g_sessions.size()) return -1;
+    return row;
 }
 
 void SelectRow(int idx) {
@@ -283,6 +295,7 @@ void DoConnect(const Session& s) {
 
 struct ProbeTask {
     Session s;
+    HWND    hwnd = nullptr;     // 探测发起时的主窗口，线程结束时用它投递结果
     int     timeoutMs = 5000;
 };
 
@@ -290,10 +303,15 @@ DWORD WINAPI ProbeThread(LPVOID param) {
     ProbeTask*   t = (ProbeTask*)param;
     ProbeResult* r = new ProbeResult();
     *r = ProbeSession(t->s.protocol, t->s.host, t->s.port, t->timeoutMs);
-    if (!PostMessageW(g_hMain, WM_APP_PROBE_DONE, (WPARAM)r, (LPARAM)t)) {
-        delete r;              // 主窗口已销毁
-        delete t;
+
+    // 一定要用创建时记下的 hwnd：g_hMain 在 WM_DESTROY 里会被置空，
+    // 那时 PostMessage(nullptr,...) 会成功投递到本线程的消息队列而永远没人处理，
+    // 结果就是 r/t 两块内存泄漏。
+    bool delivered = false;
+    if (t->hwnd && IsWindow(t->hwnd)) {
+        delivered = (PostMessageW(t->hwnd, WM_APP_PROBE_DONE, (WPARAM)r, (LPARAM)t) != FALSE);
     }
+    if (!delivered) { delete r; delete t; }
     return 0;
 }
 
@@ -306,7 +324,8 @@ void StartProbe(const Session& s) {
     SetCursor(LoadCursorW(nullptr, IDC_WAIT));
 
     ProbeTask* t = new ProbeTask();
-    t->s = s;
+    t->s     = s;
+    t->hwnd  = g_hMain;
     HANDLE h = CreateThread(nullptr, 0, ProbeThread, t, 0, nullptr);
     if (!h) {
         delete t;
@@ -352,10 +371,17 @@ void OnEdit() {
     if (idx < 0) { SetStatus(L"请先选中一条会话"); return; }
     Session s = g_sessions[idx];
     if (!ShowEditDialog(g_hMain, s, false)) return;
+    const Session old = g_sessions[idx];
     g_sessions[idx] = s;
-    PersistSessions();
     RefreshList();
     SelectRow(idx);
+    if (!PersistSessions()) {
+        // 落盘失败就把内存改回去，别让界面和磁盘上的数据对不上
+        g_sessions[idx] = old;
+        RefreshList();
+        SelectRow(idx);
+        return;
+    }
     SetStatus(L"已保存会话：" + s.name);
 }
 
@@ -429,12 +455,26 @@ void OnImport() {
     const int r = MessageBoxW(g_hMain, q.c_str(), L"导入CSV", MB_ICONQUESTION | MB_YESNOCANCEL);
     if (r == IDCANCEL) return;
 
-    const std::vector<Session> backup = g_sessions;
-    if (r == IDYES) g_sessions.insert(g_sessions.end(), got.begin(), got.end());
-    else            g_sessions = got;
+    // 不做整份 g_sessions 的拷贝：追加失败只需截断，替换失败只需把旧列表搬回来
+    std::vector<Session> oldList;
+    const size_t oldCount = g_sessions.size();
+    if (r == IDYES) {
+        g_sessions.insert(g_sessions.end(), got.begin(), got.end());
+    } else {
+        oldList.swap(g_sessions);          // O(1) 换出，不复制
+        g_sessions.swap(got);
+    }
 
-    if (!PersistSessions()) { g_sessions = backup; return; }
+    if (!PersistSessions()) {
+        if (r == IDYES) g_sessions.resize(oldCount);
+        else            g_sessions.swap(oldList);
+        RefreshList();
+        return;
+    }
+    got.clear();
+    got.shrink_to_fit();
     RefreshList();
+    TrimWorkingSet();                      // 大批量导入后立刻回收
     ShowInfo(L"导入完成，当前共 " + FormatI64((long long)g_sessions.size()) + L" 条会话。",
              L"导入CSV 成功");
 }
@@ -523,7 +563,7 @@ void BuildToolbar(HWND hParent) {
 
 void BuildList(HWND hParent) {
     g_hList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, nullptr,
-                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT |
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_OWNERDATA |
                               LVS_SINGLESEL | LVS_SHOWSELALWAYS,
                               0, 0, 0, 0, hParent, (HMENU)(INT_PTR)IDC_LISTVIEW, g_hInst, nullptr);
     if (!g_hList) return;
@@ -612,9 +652,9 @@ struct EditCtx {
 };
 
 HWND MakeChild(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style, DWORD exStyle,
-               int id) {
+               int id, int cw = 0, int ch = 0) {
     HWND h = CreateWindowExW(exStyle, cls, text, WS_CHILD | WS_VISIBLE | style,
-                             0, 0, 0, 0, parent, (HMENU)(INT_PTR)id, g_hInst, nullptr);
+                             0, 0, cw, ch, parent, (HMENU)(INT_PTR)id, g_hInst, nullptr);
     ApplyFont(h);
     return h;
 }
@@ -635,11 +675,22 @@ void EditLayout(HWND hwnd, EditCtx* c) {
 
     const int rowH = Dp(24);
     const int step = Dp(31);
+    // 下拉框的窗口高度必须包含「展开区」，否则 comctl32 算出来的下拉列表高度是 0，点不开。
+    // 展开区按实际行高算，换字体 / 换 DPI 都不会算错。
+    int comboDrop = 0;
+    if (c->hProto) {
+        int ih = (int)SendMessageW(c->hProto, CB_GETITEMHEIGHT, 0, 0);
+        if (ih <= 0) ih = Dp(20);
+        comboDrop = kComboMinVisible * ih + Dp(8);
+    }
     int y = m;
     for (int i = 0; i < 6; ++i) {
         HWND lb = GetDlgItem(hwnd, lblIds[i]);
         if (lb) MoveWindow(lb, m, y + Dp(5), lw, Dp(18), TRUE);
-        if (edits[i]) MoveWindow(edits[i], m + lw + gap, y, ew, rowH, TRUE);
+        if (edits[i]) {
+            const int h = (edits[i] == c->hProto) ? (rowH + comboDrop) : rowH;
+            MoveWindow(edits[i], m + lw + gap, y, ew, h, TRUE);
+        }
         y += step;
     }
     HWND lbNote = GetDlgItem(hwnd, IDC_LBL_NOTE);
@@ -689,10 +740,16 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                              ES_LEFT | ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL |
                              WS_VSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, IDC_ED_NOTE);
 
-        c->hProto = MakeChild(hwnd, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
-                              WS_EX_CLIENTEDGE, IDC_CB_PROTO);
+        // 下拉框的窗口高度必须包含「展开区」才算得对：建框时给 0 的话，
+        // comctl32 算出来的下拉列表高度就是 0，列表根本点不开（这是修掉的一个真实 bug）。
+        // 建框时给足，EditLayout 里还会再按实际行高精确定位一次。
+        c->hProto = MakeChild(hwnd, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP,
+                              WS_EX_CLIENTEDGE, IDC_CB_PROTO,
+                              Dp(200), Dp(24) * (kComboMinVisible + 1));
         for (int i = 0; ProtocolList()[i]; ++i)
             SendMessageW(c->hProto, CB_ADDSTRING, 0, (LPARAM)ProtocolList()[i]);
+        // 再明确要求下拉至少显示 5 行（comctl32 v6 的 CB_SETMINVISIBLE）
+        SendMessageW(c->hProto, CB_SETMINVISIBLE, (WPARAM)kComboMinVisible, 0);
 
         MakeChild(hwnd, L"BUTTON", L"确定", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, IDOK);
         MakeChild(hwnd, L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP, 0, IDCANCEL);
@@ -794,6 +851,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         BuildStatus(hwnd);
         LayoutChildren(hwnd);
         RefreshList();
+        SetTimer(hwnd, IDT_TRIM, 1500, nullptr);   // 界面画完后回收一次工作集
         return 0;
     }
     case WM_SIZE:
@@ -830,6 +888,15 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_NOTIFY: {
         NMHDR* nh = (NMHDR*)lp;
         if (nh && nh->idFrom == IDC_LISTVIEW) {
+            if (nh->code == LVN_GETDISPINFOW) {
+                // 虚拟列表：控件来要某一格的内容
+                NMLVDISPINFOW* di = (NMLVDISPINFOW*)lp;
+                if (di->item.mask & LVIF_TEXT) {
+                    const wchar_t* txt = ListCellText((size_t)di->item.iItem, di->item.iSubItem);
+                    di->item.pszText = const_cast<wchar_t*>(txt);
+                }
+                return 0;
+            }
             if (nh->code == NM_DBLCLK) {
                 const int idx = SelectedIndex();
                 if (idx >= 0) DoConnect(g_sessions[idx]);
@@ -840,6 +907,15 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (k->wVKey == VK_RETURN) { OnConnect(); return 0; }
                 if (k->wVKey == VK_DELETE) { OnDelete();  return 0; }
             }
+        }
+        break;
+    }
+    case WM_TIMER: {
+        // 一次性定时器：界面稳定后把工作集里的闲置页交还给系统
+        if (wp == IDT_TRIM) {
+            KillTimer(hwnd, IDT_TRIM);
+            TrimWorkingSet();
+            return 0;
         }
         break;
     }
@@ -873,6 +949,12 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DESTROY:
         if (g_hFont) { DeleteObject(g_hFont); g_hFont = nullptr; }
+        {
+            HMENU m = GetMenu(hwnd);
+            if (m) { SetMenu(hwnd, nullptr); DestroyMenu(m); }   // 菜单要显式销毁
+        }
+        g_sessions.clear();
+        g_sessions.shrink_to_fit();
         g_hMain = nullptr;
         PostQuitMessage(0);
         return 0;

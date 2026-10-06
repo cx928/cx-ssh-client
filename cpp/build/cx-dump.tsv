@@ -1,0 +1,2 @@
+﻿name	protocol	host	port	username	password	note
+自动化测试会话	SFTP	127.0.0.1	2222	tester	pw,with"quote	多行||备注

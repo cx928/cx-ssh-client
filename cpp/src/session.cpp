@@ -86,6 +86,11 @@ bool ReadWholeFile(const std::wstring& path, std::string& out, std::wstring& err
         return false;
     }
     out.clear();
+    // 先按文件大小预留，避免读大文件时反复扩容（每次扩容都要复制一遍已有内容）
+    LARGE_INTEGER li{};
+    if (GetFileSizeEx(h, &li) && li.QuadPart > 0 && li.QuadPart <= (LONGLONG)(64u * 1024u * 1024u)) {
+        out.reserve((size_t)li.QuadPart);
+    }
     char buf[8192];
     DWORD got = 0;
     for (;;) {
@@ -106,6 +111,23 @@ bool ReadWholeFile(const std::wstring& path, std::string& out, std::wstring& err
     return true;
 }
 
+// 把一块内存完整写进句柄
+bool WriteAll(HANDLE h, const void* data, size_t n, std::wstring& err) {
+    const char* p = (const char*)data;
+    size_t left = n;
+    while (left > 0) {
+        const DWORD chunk = (left > (1u << 20)) ? (1u << 20) : (DWORD)left;   // 每次最多 1MB
+        DWORD wrote = 0;
+        if (!WriteFile(h, p, chunk, &wrote, nullptr) || wrote == 0) {
+            err = L"写入文件失败：" + Win32ErrText(GetLastError());
+            return false;
+        }
+        p += wrote;
+        left -= wrote;
+    }
+    return true;
+}
+
 bool WriteWholeFile(const std::wstring& path, const std::string& data, std::wstring& err) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -113,18 +135,9 @@ bool WriteWholeFile(const std::wstring& path, const std::string& data, std::wstr
         err = L"创建文件失败：" + Win32ErrText(GetLastError());
         return false;
     }
-    const char* p = data.data();
-    size_t left = data.size();
-    while (left > 0) {
-        DWORD chunk = (left > 1u << 20) ? (1u << 20) : (DWORD)left;   // 每次最多 1MB
-        DWORD wrote = 0;
-        if (!WriteFile(h, p, chunk, &wrote, nullptr) || wrote == 0) {
-            err = L"写入文件失败：" + Win32ErrText(GetLastError());
-            CloseHandle(h);
-            return false;
-        }
-        p += wrote;
-        left -= wrote;
+    if (!WriteAll(h, data.data(), data.size(), err)) {
+        CloseHandle(h);
+        return false;
     }
     FlushFileBuffers(h);
     CloseHandle(h);
@@ -295,6 +308,7 @@ std::wstring StorageFilePath() {
 
 std::string SessionsToText(const std::vector<Session>& list) {
     std::string out;
+    out.reserve(list.size() * 96 + 32);   // 粗估每条约 96 字节，省掉反复扩容的整块复制
     out += "CXSSHCLIENT-SESSIONS\t1\r\n";
     for (const Session& s : list) {
         const std::wstring port = FormatI64(s.port);
@@ -411,9 +425,15 @@ bool LoadSessions(std::vector<Session>& out, std::wstring& err) {
               L"（数据文件可能由其他 Windows 账户或计算机创建）";
         return false;
     }
+    // 直接从 DPAPI 的输出缓冲区解析，省掉一份整块明文的拷贝
     std::string text;
-    if (plain.pbData && plain.cbData) text.assign((const char*)plain.pbData, plain.cbData);
-    if (plain.pbData) LocalFree(plain.pbData);
+    if (plain.pbData && plain.cbData) {
+        text.assign((const char*)plain.pbData, plain.cbData);
+        LocalFree(plain.pbData);
+        plain.pbData = nullptr;
+    }
+    raw.clear();          // 密文已经用不上了，尽早还给分配器
+    raw.shrink_to_fit();
 
     std::wstring perr;
     if (!TextToSessions(text, out, perr)) {
@@ -428,7 +448,7 @@ bool SaveSessions(const std::vector<Session>& list, std::wstring& err) {
     err.clear();
     if (!EnsureStorageDir(err)) return false;
 
-    const std::string text = SessionsToText(list);
+    std::string text = SessionsToText(list);
     DATA_BLOB in{};
     in.pbData = (BYTE*)text.data();
     in.cbData = (DWORD)text.size();
@@ -439,17 +459,30 @@ bool SaveSessions(const std::vector<Session>& list, std::wstring& err) {
         err = L"DPAPI 加密失败：" + Win32ErrText(GetLastError());
         return false;
     }
-    std::string blob;
-    blob.append(kMagic, sizeof(kMagic));
-    blob.append((const char*)&kFormatVer, 4);
-    if (cipher.pbData && cipher.cbData)
-        blob.append((const char*)cipher.pbData, cipher.cbData);
-    if (cipher.pbData) LocalFree(cipher.pbData);
+    text.clear();
+    text.shrink_to_fit();                      // 明文用完立刻释放，别和密文同时占着
 
-    // 先写临时文件再改名，避免写入中断把原数据毁掉
+    // 先写临时文件再改名，避免写入中断把原数据毁掉。
+    // 文件头和密文分两次写，中间不再复制一份完整密文。
     const std::wstring path = StorageFilePath();
     const std::wstring tmp  = path + L".tmp";
-    if (!WriteWholeFile(tmp, blob, err)) return false;
+    bool ok = false;
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        err = L"创建文件失败：" + Win32ErrText(GetLastError());
+    } else {
+        char head[sizeof(kMagic) + 4];
+        memcpy(head, kMagic, sizeof(kMagic));
+        memcpy(head + sizeof(kMagic), &kFormatVer, 4);
+        ok = WriteAll(h, head, sizeof(head), err) &&
+             WriteAll(h, cipher.pbData, cipher.cbData, err);
+        if (ok) FlushFileBuffers(h);
+        CloseHandle(h);
+    }
+    if (cipher.pbData) LocalFree(cipher.pbData);
+    if (!ok) { DeleteFileW(tmp.c_str()); return false; }
+
     if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
         err = L"替换数据文件失败：" + Win32ErrText(GetLastError());
         DeleteFileW(tmp.c_str());
