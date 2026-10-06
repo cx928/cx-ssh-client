@@ -264,10 +264,53 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": "unknown endpoint"})
 
 
+class SecureThreadingHTTPServer(ThreadingHTTPServer):
+    """每连接独立线程完成 TLS 握手, 并设置握手超时。
+
+    原实现用 ctx.wrap_socket() 包装监听套接字, 握手发生在 accept 循环内:
+    任何一条卡住的连接(客户端连上后不发数据)都会让服务停止接受新连接,
+    表现为「端口可连接但无响应」。
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 128
+    handshake_timeout = 15.0
+
+    def __init__(self, addr, handler, ssl_ctx=None):
+        self._ssl_ctx = ssl_ctx
+        super().__init__(addr, handler)
+
+    def process_request(self, request, client_address):
+        if self._ssl_ctx is None:
+            super().process_request(request, client_address)
+            return
+        threading.Thread(target=self._tls_then_serve,
+                         args=(request, client_address), daemon=True).start()
+
+    def _tls_then_serve(self, sock, addr):
+        try:
+            sock.settimeout(self.handshake_timeout)
+            tls = self._ssl_ctx.wrap_socket(sock, server_side=True)
+            tls.settimeout(None)
+        except Exception:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return
+        try:
+            self.finish_request(tls, addr)
+        except Exception:
+            try:
+                self.shutdown_request(tls)
+            except Exception:
+                pass
+
+
 def serve(port: int, cert: str = None, key: str = None, http_only: bool = False):
     init_db()
-    srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    srv.daemon_threads = True
+    ctx = None
     scheme = "http"
     if not http_only and cert and key and os.path.exists(cert) and os.path.exists(key):
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -276,8 +319,8 @@ def serve(port: int, cert: str = None, key: str = None, http_only: bool = False)
         except AttributeError:
             pass
         ctx.load_cert_chain(cert, key)
-        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
         scheme = "https"
+    srv = SecureThreadingHTTPServer(("0.0.0.0", port), Handler, ctx)
     print(f"RemoteHub {VERSION} listening on {scheme}://0.0.0.0:{port}", flush=True)
     try:
         srv.serve_forever()
