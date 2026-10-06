@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ContentDialog
+    x:Class="CxSshClient.Views.ImportDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="导入密码文件"
+    PrimaryButtonText="选择文件并导入"
+    CloseButtonText="取消"
+    DefaultButton="Primary">
+
+    <StackPanel Width="440" Spacing="14">
+        <TextBlock Text="支持两种格式：程星SSH客户端 加密备份 (.json) 与 CSV 明文表格。"
+                   TextWrapping="Wrap" FontSize="12.5"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+
+        <RadioButtons x:Name="ModeButtons" SelectedIndex="1" SelectionChanged="Mode_Changed">
+            <RadioButton Content="加密备份 (.json / .novakey) — 需要备份口令"/>
+            <RadioButton Content="CSV 明文表格 — 从其他工具导出"/>
+        </RadioButtons>
+
+        <PasswordBox x:Name="PassBox" Header="备份口令" PlaceholderText="导出加密备份时设置的口令"
+                     IsEnabled="False"/>
+
+        <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="10" Padding="12">
+            <StackPanel Spacing="6">
+                <TextBlock Text="CSV 列名参考 (表头)" FontSize="12" FontWeight="SemiBold"/>
+                <TextBlock FontSize="11.5" TextWrapping="Wrap"
+                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                           Text="name, group, protocol, host, port, username, password, note&#x0a;其中 protocol 支持 ssh / sftp / ftp / rdp / vnc，也接受中文表头（主机、端口、用户名、密码 等）。"/>
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</ContentDialog>

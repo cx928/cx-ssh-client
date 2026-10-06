@@ -1,0 +1,23 @@
+# 构建产物
+bin/
+obj/
+obj2/
+bin2/
+dist/
+build/
+*.user
+*.suo
+.vs/
+
+# 发布包 (通过 GitHub Releases 分发)
+installer/*.exe
+installer/*.zip
+*.7z
+
+# 运行时数据
+cx-ssh-client-data/
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db

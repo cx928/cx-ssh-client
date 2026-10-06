@@ -1,64 +1,42 @@
-# cx-ssh-client 
+# cx-ssh-client
 
-an SSH client tool developed by Chengxing Studio, supporting SSH remote connection and SFTP file management.
+An SSH client tool developed by Chengxing Studio, supporting SSH remote connection and SFTP file management, with **WinUI / .NET CLI / native C++** implementations.
 
-[简体中文](https://github.com/cx928/cx-ssh-client/blob/main/README_cns.md)  
+[简体中文](README_cns.md) | [繁體中文](README.md) | [English](README_en.md)
 
-[繁體中文](https://github.com/cx928/cx-ssh-client/blob/main/README.md)  
+⚠️ Preview release, intended mainly for feature validation and testing.
 
-[English](https://github.com/cx928/cx-ssh-client/blob/main/README_en.md)
+## 📦 Version
 
-⚠️ The current version is a Preview release, intended primarily for feature validation and testing.
+- Current version: **v1.0.0**
+- Website: <https://www.cxbk.cc>
+- Downloads: <https://github.com/cx928/cx-ssh-client/releases>
 
-📦 Version Information
+## 🧩 Implementations
 
-• Current Version: v0.0.3
+| Implementation | Folder | Stack | Notes |
+|---|---|---|---|
+| **WinUI GUI** (recommended) | `winui/` | WinUI 3 + .NET 8 | SSH/SFTP/FTP/RDP/VNC, encrypted vault, account sync |
+| **.NET CLI** | `dotnet/` | .NET 8 | Manage sessions, run commands, transfer files in a terminal |
+| **Native C++** | `cpp/` | Win32 API (MinGW) | Zero third-party dependencies, protocol probing |
+| **Python (legacy v0.0.3)** | `legacy/` | Python 3 + paramiko | Early preview, kept for reference |
 
-• Official Website: <https://www.cxbk.cc>
+## 🚀 Quick start
 
-• Download Page: <https://github.com/cx928/cx-ssh-client/releases/tag/cxgzs>
+```powershell
+# GUI
+dotnet build winui/CxSshClient.csproj -c Release -p:Platform=x64 -r win-x64
 
-✨ Key Features
+# CLI
+dotnet build dotnet/CxSshClient.Cli.csproj -c Release -r win-x64
+cx list
+cx exec myserver "uname -a"
+```
 
-• SSH remote login and management
+## ☁️ Optional sync server
 
-• Built-in SFTP file upload / download / management
+`server/` contains a zero-dependency (Python standard library) sync server for Linux. The server stores **ciphertext only**; sessions and passwords are encrypted client-side with AES-256-GCM (PBKDF2-derived key). See `server/README-server.md`.
 
-• Lightweight design, suitable for secondary development and customization
+## 📄 License
 
-• Cross-platform support (requires Python environment)
-
-🧰 Environment Dependencies
-
-• Python 3.x
-
-• Common dependencies (such as paramiko, cryptography, etc.; please refer to the project source code for details)
-
-🚀 Quick Start
-
-Option 1: Using Pre-compiled Package (Recommended)
-
-1. Go to https://github.com/cx928/cx-ssh-client/releases/tag/cxgzs and download:
-   • ssh-client.v0.0.3.7z
-
-2. Extract the archive and navigate to the program directory in your terminal
-3. Launch the application using Python:
-   python main.py
-   
-
-Option 2: Running from Source Code
-
-git clone https://github.com/cx928/cx-ssh-client.git
-cd cx-ssh-client
-python main.py
-
-
-📥 Downloads & Verification
-
-File Type Checksum
-
-ssh-client.v0.0.3.7z Pre-compiled Package e7fd1aa07dcce8d354a2efb2cab617b393b1e9da9a3f1501162b1dff3fee0fff
-
-Source code (zip) Source Code —
-
-Source code (tar.gz) Source Code —
+[Mozilla Public License 2.0](LICENSE)
