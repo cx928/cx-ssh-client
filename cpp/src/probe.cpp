@@ -1,4 +1,4 @@
-// probe.cpp - 真实协议探测：TCP + SSH/FTP/VNC banner 握手（WinSock2）
+﻿// probe.cpp - 真实协议探测：TCP + SSH/FTP/VNC banner 握手（WinSock2）
 // 程星SSH客户端 (cx-ssh-client) 原生 C++ 版 / MPL-2.0
 #include "probe.h"
 
@@ -74,13 +74,17 @@ bool ConnectTimeout(const std::wstring& host, int port, int timeoutMs, SOCKET& o
                 closesocket(s);
                 continue;
             }
-            fd_set wset;
+            fd_set wset, eset;
             FD_ZERO(&wset);
             FD_SET(s, &wset);
+            FD_ZERO(&eset);
+            FD_SET(s, &eset);
             timeval tv{};
             tv.tv_sec  = timeoutMs / 1000;
             tv.tv_usec = (timeoutMs % 1000) * 1000;
-            const int sel = select(0, nullptr, &wset, nullptr, &tv);
+            // Winsock 与 BSD 不同：非阻塞 connect 失败时套接字进入 exceptfds 而不是 writefds，
+            // 只等 writefds 会在端口关闭时一直等到超时。两个集合都要等。
+            const int sel = select(0, nullptr, &wset, &eset, &tv);
             if (sel == 0) {
                 lastErr = L"连接超时（" + FormatI64(timeoutMs) + L" 毫秒内未建立 TCP 连接）";
                 closesocket(s);
@@ -340,23 +344,26 @@ ProbeResult ProbeSession(const std::wstring& proto, const std::wstring& host, in
         return r;
     }
 
-    r.detail += L"TCP " + host + L":" + FormatI64(port) + L" 已连接。\r\n";
+    const std::wstring tcpNote = L"TCP " + host + L":" + FormatI64(port) + L" 已连接。\r\n";
 
-    if (p == L"SSH" || p == L"SFTP")      r = DoSsh(timeoutMs, start);
-    else if (p == L"FTP")                 r = DoFtp(timeoutMs, start);
-    else if (p == L"VNC")                 r = DoVnc(timeoutMs, start);
+    ProbeResult pr;
+    if (p == L"SSH" || p == L"SFTP")      pr = DoSsh(timeoutMs, start);
+    else if (p == L"FTP")                 pr = DoFtp(timeoutMs, start);
+    else if (p == L"VNC")                 pr = DoVnc(timeoutMs, start);
     else if (p == L"RDP") {
         // RDP 需要 TLS + CredSSP 协商，这里只做 TCP 连通性测试
-        r.ok      = true;
-        r.summary = L"RDP 端口可达（未做 TLS 协商）";
-        r.detail += L"RDP 使用 TLS 协商，本程序只验证 TCP 可达性。";
+        pr.ok      = true;
+        pr.summary = L"RDP 端口可达（未做 TLS 协商）";
+        pr.detail  = L"RDP 使用 TLS 协商，本程序只验证 TCP 可达性。";
     } else {
-        r.ok      = true;
-        r.summary = L"TCP 端口可达";
-        r.detail += L"未指定具体协议，仅完成 TCP 连通性测试。";
+        pr.ok      = true;
+        pr.summary = L"TCP 端口可达";
+        pr.detail  = L"未指定具体协议，仅完成 TCP 连通性测试。";
     }
 
-    r.elapsedMs = (long long)(GetTickCount64() - start);
+    // 把 TCP 阶段的进展拼回协议阶段的结果（pr 是整体赋值出来的，别把这段说明丢掉）
+    pr.detail   = tcpNote + pr.detail;
+    pr.elapsedMs = (long long)(GetTickCount64() - start);
     CloseSock();
-    return r;
+    return pr;
 }

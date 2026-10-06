@@ -1,0 +1,5 @@
+/* app.rc - 资源脚本：把应用程序清单嵌进 exe
+ * 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID, 24 = RT_MANIFEST
+ * 需要 comctl32 v6 才能拿到现代控件外观（工具栏 / ListView / 状态栏）。
+ */
+1 24 "app.manifest"

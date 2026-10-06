@@ -3,11 +3,11 @@
 ;  生成: 单文件安装向导, 含开始菜单/桌面快捷方式与卸载程序
 ; ============================================================
 #define MyAppName "程星SSH客户端"
-#define MyAppVersion "1.0.2"
+#define MyAppVersion "1.0.0"
 #define MyAppExeName "cx-ssh-client.exe"
-#define DistDir "E:\Documents\deepseek-harness\default-workspace\dist"
-#define IconFile "E:\Documents\deepseek-harness\default-workspace\cx-ssh-client\Assets\app.ico"
-#define OutDir "E:\Documents\deepseek-harness\default-workspace\installer"
+#define DistDir "E:\Documents\deepseek-harness\default-workspace\cx-ssh-client\dist"
+#define IconFile "E:\Documents\deepseek-harness\default-workspace\cx-ssh-client\winui\Assets\app.ico"
+#define OutDir "E:\Documents\deepseek-harness\default-workspace\cx-ssh-client\installer"
 
 [Setup]
 AppId={{C1F4A0E2-9B7D-4E51-9A66-7D2C4B8F1A35}

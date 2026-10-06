@@ -1,4 +1,4 @@
-// session.h - 会话数据模型、本地加密存储(DPAPI)、CSV 导入导出
+﻿// session.h - 会话数据模型、本地加密存储(DPAPI)、CSV 导入导出
 // 程星SSH客户端 (cx-ssh-client) 原生 C++ 版 / MPL-2.0
 #pragma once
 

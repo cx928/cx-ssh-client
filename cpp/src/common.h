@@ -1,4 +1,4 @@
-// common.h - 公共头文件：Windows 版本宏、通用工具函数声明
+﻿// common.h - 公共头文件：Windows 版本宏、通用工具函数声明
 // 程星SSH客户端 (cx-ssh-client) 原生 C++ 版 / MPL-2.0
 #pragma once
 

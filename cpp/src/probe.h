@@ -1,4 +1,4 @@
-// probe.h - 真实协议探测（WinSock2，无第三方库）
+﻿// probe.h - 真实协议探测（WinSock2，无第三方库）
 // 程星SSH客户端 (cx-ssh-client) 原生 C++ 版 / MPL-2.0
 #pragma once
 

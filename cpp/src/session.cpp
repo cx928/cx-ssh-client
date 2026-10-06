@@ -1,4 +1,4 @@
-// session.cpp - 会话数据模型 / DPAPI 加密存储 / CSV 导入导出
+﻿// session.cpp - 会话数据模型 / DPAPI 加密存储 / CSV 导入导出
 // 程星SSH客户端 (cx-ssh-client) 原生 C++ 版 / MPL-2.0
 //
 // 数据文件格式（%LOCALAPPDATA%\cx-ssh-client\sessions.dat）：
@@ -15,6 +15,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 
 namespace {
 
@@ -76,9 +77,6 @@ std::vector<std::string> SplitTab(const std::string& line) {
     return parts;
 }
 
-// 把 Wide 字符串按 UTF-8 追加到字节缓冲
-void AppendBytes(std::string& dst, const std::wstring& w) { dst += WideToUtf8(w); }
-
 // 读取整个文件；成功返回 true
 bool ReadWholeFile(const std::wstring& path, std::string& out, std::wstring& err) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
@@ -133,16 +131,41 @@ bool WriteWholeFile(const std::wstring& path, const std::string& data, std::wstr
     return true;
 }
 
-// 确保 %LOCALAPPDATA%\cx-ssh-client 存在
-bool EnsureStorageDir(std::wstring& err) {
-    const std::wstring dir = StorageFilePath();
-    const size_t pos = dir.find_last_of(L'\\');
-    if (pos == std::wstring::npos) { err = L"无法解析数据目录"; return false; }
-    const std::wstring folder = dir.substr(0, pos);
-    if (CreateDirectoryW(folder.c_str(), nullptr)) return true;
+// 创建目录（含中间层级）；已存在也算成功
+bool MakeDirs(const std::wstring& dir) {
+    if (dir.empty()) return false;
+    if (CreateDirectoryW(dir.c_str(), nullptr)) return true;
     const DWORD e = GetLastError();
     if (e == ERROR_ALREADY_EXISTS) return true;
-    err = L"创建目录失败：" + Win32ErrText(e);
+    if (e == ERROR_PATH_NOT_FOUND) {
+        const size_t pos = dir.find_last_of(L'\\');
+        if (pos == std::wstring::npos || pos == 0) return false;
+        if (!MakeDirs(dir.substr(0, pos))) return false;
+        if (CreateDirectoryW(dir.c_str(), nullptr)) return true;
+        return GetLastError() == ERROR_ALREADY_EXISTS;
+    }
+    return false;
+}
+
+// 目录是否可用（能建出来 + 能写文件）。用一次「建探针文件再删掉」来确认。
+bool DirWritable(const std::wstring& dir) {
+    if (!MakeDirs(dir)) return false;
+    const std::wstring probe = dir + L"\\.cx-write-probe.tmp";
+    HANDLE h = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    CloseHandle(h);                       // FILE_FLAG_DELETE_ON_CLOSE：句柄一关文件就没了
+    return true;
+}
+
+// 确保存储目录存在
+bool EnsureStorageDir(std::wstring& err) {
+    const std::wstring file = StorageFilePath();
+    const size_t pos = file.find_last_of(L'\\');
+    if (pos == std::wstring::npos) { err = L"无法解析数据目录"; return false; }
+    const std::wstring folder = file.substr(0, pos);
+    if (MakeDirs(folder)) return true;
+    err = L"创建目录失败：" + Win32ErrText(GetLastError()) + L"（" + folder + L"）";
     return false;
 }
 
@@ -224,19 +247,46 @@ int DefaultPortFor(const std::wstring& proto) {
 }
 
 std::wstring StorageFilePath() {
-    wchar_t base[MAX_PATH * 2] = { 0 };
-    // CSIDL_LOCAL_APPDATA，失败时退回 TEMP，保证程序不崩
-    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, base))) {
-        wchar_t tmp[MAX_PATH * 2] = { 0 };
-        if (GetTempPathW(MAX_PATH, tmp) == 0) return L"sessions.dat";
-        std::wstring p = tmp;
-        if (!p.empty() && p.back() != L'\\') p += L'\\';
-        return p + L"cx-ssh-client\\sessions.dat";
-    }
-    std::wstring p = base;
-    if (!p.empty() && p.back() != L'\\') p += L'\\';
-    p += L"cx-ssh-client\\sessions.dat";
-    return p;
+    // 只在首次调用时做一次可写性探测，结果缓存下来（std::call_once 保证线程安全）
+    static std::wstring cached;
+    static std::once_flag once;
+    std::call_once(once, []() {
+        std::vector<std::wstring> cands;
+
+        // 首选：%LOCALAPPDATA%\cx-ssh-client
+        wchar_t base[MAX_PATH * 2] = { 0 };
+        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, base))) {
+            std::wstring p = base;
+            if (!p.empty() && p.back() != L'\\') p += L'\\';
+            cands.push_back(p + L"cx-ssh-client");
+        }
+        // 备选 1：程序所在目录\cx-ssh-client-data（便携模式 / 受限环境）
+        {
+            wchar_t exe[MAX_PATH * 2] = { 0 };
+            if (GetModuleFileNameW(nullptr, exe, MAX_PATH) > 0) {
+                std::wstring p = exe;
+                const size_t pos = p.find_last_of(L'\\');
+                if (pos != std::wstring::npos) cands.push_back(p.substr(0, pos) + L"\\cx-ssh-client-data");
+            }
+        }
+        // 备选 2：%TEMP%\cx-ssh-client
+        {
+            wchar_t tmp[MAX_PATH * 2] = { 0 };
+            if (GetTempPathW(MAX_PATH, tmp) > 0) {
+                std::wstring p = tmp;
+                if (!p.empty() && p.back() != L'\\') p += L'\\';
+                cands.push_back(p + L"cx-ssh-client");
+            }
+        }
+
+        for (const std::wstring& d : cands) {
+            if (DirWritable(d)) { cached = d + L"\\sessions.dat"; return; }
+        }
+        // 都不行就返回首选路径，具体错误留给保存时如实上报
+        cached = cands.empty() ? std::wstring(L"sessions.dat")
+                               : (cands[0] + L"\\sessions.dat");
+    });
+    return cached;
 }
 
 // ---------------------------------------------------------------------------
@@ -434,7 +484,7 @@ bool ExportCsv(const std::wstring& path, const std::vector<Session>& list, std::
         out += CsvQuote(s.name);              out += ',';
         out += CsvQuote(s.protocol);          out += ',';
         out += CsvQuote(s.host);              out += ',';
-        out += FormatI64(s.port);             out += ',';
+        out += std::to_string(s.port);        out += ',';
         out += CsvQuote(s.username);          out += ',';
         out += CsvQuote(s.password);          out += ',';
         out += CsvQuote(s.note);
